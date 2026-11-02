@@ -780,12 +780,16 @@ impl Display {
         config: &UiConfig,
         search_state: &mut SearchState,
     ) {
+        terminal.set_cell_size(self.size_info.cell_width(), self.size_info.cell_height());
+        let graphics = terminal.renderable_graphics();
+
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, self, &terminal, search_state);
         let mut grid_cells = Vec::new();
         for cell in &mut content {
             grid_cells.push(cell);
         }
+        Renderer::hide_graphics_placeholders(&mut grid_cells);
         let selection_range = content.selection_range();
         let foreground_color = content.color(NamedColor::Foreground as usize);
         let background_color = content.color(NamedColor::Background as usize);
@@ -875,7 +879,9 @@ impl Display {
 
                 cell
             });
+            self.renderer.draw_graphics_below(&size_info, &graphics);
             self.renderer.draw_cells(&size_info, glyph_cache, cells);
+            self.renderer.draw_graphics_above(&size_info, &graphics);
         }
 
         let mut rects = lines.rects(&metrics, &size_info);

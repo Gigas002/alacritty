@@ -86,7 +86,8 @@ windows-sys = { version = "0.59", features = [
 embed-resource = "3.0.2"
 
 [features]
-default = ["wayland", "x11"]
+default = ["wayland", "x11", "kitty_graphics"]
+kitty_graphics = ["alacritty_terminal/kitty_graphics"]
 x11 = [
     "copypasta/x11",
     "winit/x11",
