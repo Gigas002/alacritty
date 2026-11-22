@@ -1,0 +1,115 @@
+# Keeps feature/kitty-protocol-graphics rebased onto upstream alacritty's master.
+#
+# Daily (and on demand): if upstream moved, rebase the branch onto it (Cargo.lock conflicts are
+# resolved automatically, see .github/scripts/bump-upstream.sh), build and test it, and
+# force-push it (with a lease, so a push made meanwhile is never overwritten). The fork's master
+# is fast-forwarded to upstream's too. Anything else — a conflict outside Cargo.lock, upstream
+# moving past the vendored vte, a failing build or test — pushes nothing and opens (or comments
+# on) an issue titled "bump-upstream failed", which the next run that finds the branch on top of
+# upstream closes.
+#
+# Setup:
+# - Scheduled workflows only run from the default branch, so make this branch the default
+#   (`gh repo edit --default-branch feature/kitty-protocol-graphics`), or start it by hand.
+# - GITHUB_TOKEN may not push commits that touch .github/workflows, and upstream's commits
+#   sometimes do. Add a BUMP_TOKEN secret: a fine-grained token for this repository with
+#   Contents and Workflows read/write. Without it, such pushes fail and are reported.
+name: bump-upstream
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: bump-upstream
+  cancel-in-progress: false
+
+env:
+  BRANCH: feature/kitty-protocol-graphics
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.BUMP_TOKEN || github.token }}
+
+      - name: Check upstream
+        id: check
+        run: |
+          echo "old=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          .github/scripts/bump-upstream.sh check >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev python3
+
+      - name: Rebase
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -o pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .github/scripts/bump-upstream.sh rebase 2>&1 | tee -a bump.log
+
+      - name: Test
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee -a bump.log
+          cargo test -p alacritty_terminal --no-default-features 2>&1 | tee -a bump.log
+
+      - name: Push
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -o pipefail
+          git push --force-with-lease="refs/heads/$BRANCH:${{ steps.check.outputs.old }}" \
+            origin "HEAD:refs/heads/$BRANCH" 2>&1 | tee -a bump.log
+          # The fork's master mirrors upstream; a fast-forward only, so a diverged master is
+          # left alone (and only warned about).
+          git push origin "refs/remotes/upstream/master:refs/heads/master" \
+            || echo "::warning::master is not a fast-forward of upstream's; left as is"
+
+      - name: Close the failure issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --state open --search 'in:title "bump-upstream failed"' --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Fixed: $BRANCH is on top of upstream $(git rev-parse --short upstream/master) ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          done
+
+      - name: Report the failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Upstream: $(git rev-parse --short upstream/master 2>/dev/null || echo '?')"
+            echo
+            echo '```'
+            grep -E '::error::|^error(\[|:)|CONFLICT|panicked|FAILED|rejected' bump.log 2>/dev/null | head -40 \
+              || echo "No log; see the run."
+            echo '```'
+            echo
+            echo "Nothing was pushed. Rebase $BRANCH onto upstream/master by hand, fix, and push; the next run closes this issue."
+          } > body.md
+          n=$(gh issue list --state open --search 'in:title "bump-upstream failed"' --json number --jq '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body-file body.md
+          else
+            gh issue create --title "bump-upstream failed" --body-file body.md
+          fi
